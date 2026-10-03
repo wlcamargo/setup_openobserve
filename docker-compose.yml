@@ -1,0 +1,65 @@
+services:
+  minio:
+    # Official minio/minio images are no longer published; this is the
+    # community-maintained open-source fork (AGPLv3) by Pigsty.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    container_name: minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+    volumes:
+      - ./minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio-init:
+    image: pgsty/mc:RELEASE.2026-09-16T00-00-00Z
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_USER: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      MINIO_PASSWORD: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+      BUCKET: ${S3_BUCKET_NAME:-openobserve}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$MINIO_USER $$MINIO_PASSWORD &&
+      mc mb --ignore-existing local/$$BUCKET
+      "
+    restart: "no"
+
+  openobserve:
+    image: o2cr.ai/openobserve/openobserve-enterprise:latest
+    container_name: openobserve
+    restart: unless-stopped
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      ZO_DATA_DIR: /data
+      ZO_ROOT_USER_EMAIL: chapolin@chapolin.com
+      ZO_ROOT_USER_PASSWORD: Mudar@1234
+      ZO_LOCAL_MODE_STORAGE: s3
+      ZO_S3_PROVIDER: minio
+      ZO_S3_SERVER_URL: ${S3_SERVER_URL:-http://minio:9000}
+      ZO_S3_ACCESS_KEY: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      ZO_S3_SECRET_KEY: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+      ZO_S3_REGION_NAME: ${AWS_REGION:-us-east-1}
+      ZO_S3_BUCKET_NAME: ${S3_BUCKET_NAME:-openobserve}
+      ZO_S3_BUCKET_PREFIX: ${S3_BUCKET_PREFIX:-openobserve/}
+      # Seconds data stays in the local WAL before being uploaded to S3
+      # (OpenObserve default is 600). Lowered so uploads show up quickly.
+      ZO_MAX_FILE_RETENTION_TIME: ${ZO_MAX_FILE_RETENTION_TIME:-60}
+    volumes:
+      - ./openobserve-data:/data
+    ports:
+      - "5080:5080"
